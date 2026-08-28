@@ -5,6 +5,7 @@
  * UI 通过注册回调感知状态切换并渲染对应界面/动画。
  */
 #include <string.h>
+#include <assert.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "esp_log.h"
