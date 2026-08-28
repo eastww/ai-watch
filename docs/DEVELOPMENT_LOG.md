@@ -5,6 +5,51 @@
 
 ---
 
+## 2026-08-28（晚间）
+
+### 🔧 修复：持续编译报错 + 白屏问题（已完成）
+
+**现象**：
+- `idf.py build` 报 `ninja failed`。
+- 烧录后白屏、反复重启（`task_wdt` 看门狗超时）。
+
+**根因（两个独立问题）**：
+
+1. **编译报错直接原因**：`main/CMakeLists.txt` 引用的源文件
+   `app_main_simple_2.c` 不存在（调试过程中残留了 5 个实验副本：
+   `app_main_api_error.c` / `app_main_full.c` / `app_main_previous.c` /
+   `app_main_with_state.c` / `app_main_with_touch_issue.c`，没有一个叫被引用的名字）。
+   - 解决：删除全部实验副本，CMakeLists 改为显式引用
+     `app_main.c` + `src/app_state.c`，`PRIV_REQUIRES` 与已验证过的结构一致。
+
+2. **LVGL 9 API 使用错误**：用了不存在的 `lv_indev_set_cb`，
+   应为 `lv_indev_set_read_cb`（`lv_indev_read_cb_t` 签名）；且触摸回调
+   定义在函数内部（GCC 嵌套函数扩展）。
+   - 解决：回调移到文件作用域，改用标准 LVGL 9 API，`
+   bsp_display_lock()/unlock()` 保护。
+
+**白屏根因（上轮已确认）**：`app_main` 手动调 `lv_timer_handler()` 与
+`esp_lv_adapter` 内部 worker 任务并发驱动 LVGL → 数据竞争 → 看门狗复位。
+本轮延续修复：主循环只做日志，不再碰 LVGL。
+
+**IDE 假报错**：IntelliSense 找不到 `FreeRTOS.h`/`sdkconfig.h` 等
+（不影响编译）。解决：新增 `.vscode/c_cpp_properties.json`
+指向 `build/compile_commands.json`。
+
+**清理**：删除调试残留临时文件（`test_syntax.py`、`QUICK_FIX.md`、
+`CODE_VERIFICATION.md`、`TROUBLESHOOTING.md`、`BUILD_INSTRUCTIONS.md`、
+`setup_env.ps1`）。
+
+**结果**：✅ `idf.py build` 通过（`ai_watch.bin` 0x9d170 bytes，分区剩余 96%）。
+
+**经验教训**：
+1. 每次改 `app_main` 前先同步更新 `main/CMakeLists.txt` 里的源文件列表，
+   否则会出现"引用不存在的文件"这类莫名报错。
+2. 不要在 `main/` 下堆实验副本文件，改用 git 分支/提交管理版本。
+3. LVGL 9 触摸 API：`lv_indev_set_read_cb()`，不是 v8 的 `lv_indev_set_cb()`。
+
+---
+
 ## 2026-08-28
 
 ### ✅ M1 里程碑：环境搭建 + 首次编译通过
