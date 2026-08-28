@@ -1,0 +1,16 @@
+# 托管组件依赖（idf_component_manager 自动下载）
+dependencies:
+  idf: ">=5.0"
+
+  # ---- 板级 / 显示 / 触摸 / 音频 codec ----
+  espressif/esp_codec_dev: "^1.4"
+  espressif/esp_lv_adapter: "^0.1"
+  espressif/lvgl: "~9.1.0"
+  espressif/i2c_bus: "^2.0"
+  espressif/iot_button: "^4.0"
+
+  # ---- 本地唤醒词（ESP-SR，M5 阶段引入）----
+  espressif/esp-sr: "^2.1.0"
+
+  # ---- 云服务 HTTP/WS ----
+  espressif/esp_websocket_client: "^1.3"

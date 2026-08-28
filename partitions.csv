@@ -1,0 +1,6 @@
+# ESP-IDF partition table for ai-watch (16MB flash)
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0x9000,   0x6000,
+phy_init, data, phy,     0xf000,   0x1000,
+factory,  app,  factory, 0x10000,  0xE00000,   # 14MB app
+storage,  data, spiffs,  0xE10000, 0x1F0000,   # ~2MB data (TTS cache etc.)
