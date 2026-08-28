@@ -1,9 +1,8 @@
-file(GLOB_RECURSE MAIN_SRCS ./*.cpp ./*.c)
-set(EMBEDDED_FILES "")
-
 idf_component_register(
-    SRCS ${MAIN_SRCS}
-    INCLUDE_DIRS "."
+    SRCS
+        "app_main.c"
+        "src/app_state.c"
+    INCLUDE_DIRS "." "include"
     PRIV_REQUIRES
         nvs_flash
         esp_wifi

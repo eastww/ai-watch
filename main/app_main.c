@@ -24,9 +24,9 @@ static const char *TAG = "ai_watch";
 
 /* ============ UI（M1 占位，后续拆到 src/ui/） ============ */
 
-static void ui_status_update(void *arg)
+static void ui_status_update(lv_timer_t *timer)
 {
-    lv_obj_t *label = (lv_obj_t *)arg;
+    lv_obj_t *label = (lv_obj_t *)lv_timer_get_user_data(timer);
     /* 时钟 / 电量占位：M1 只显示运行时间 */
     uint32_t sec = esp_timer_get_time() / 1000000ULL;
     char buf[32];
@@ -49,7 +49,7 @@ static void ui_main_screen_create(void)
 
     lv_obj_t *clock = lv_label_create(scr);
     lv_label_set_text(clock, "00:00:00");
-    lv_obj_set_style_text_font(clock, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_font(clock, &lv_font_montserrat_14, 0);
     lv_obj_align(clock, LV_ALIGN_CENTER, 0, -10);
 
     lv_obj_t *hint = lv_label_create(scr);

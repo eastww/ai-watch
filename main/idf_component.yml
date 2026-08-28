@@ -1,16 +1,15 @@
 # 托管组件依赖（idf_component_manager 自动下载）
+#
+# 注意：
+# - 板级 BSP（waveshare__esp32_s3_touch_lcd_1_85B）已放在 components/ 本地目录，
+#   它自带的 idf_component.yml 会自动拉取显示/触摸/音频 codec/LVGL 等依赖，
+#   这里不需要重复声明，避免版本冲突。
+# - 云服务客户端：DeepSeek(HTTPS) 用 esp_http_client（IDF 内置），
+#   讯飞 ASR 用 WebSocket（espressif/esp_websocket_client）。
 dependencies:
-  idf: ">=5.0"
+  idf: ">=5.3"
 
-  # ---- 板级 / 显示 / 触摸 / 音频 codec ----
-  espressif/esp_codec_dev: "^1.4"
-  espressif/esp_lv_adapter: "^0.1"
-  espressif/lvgl: "~9.1.0"
-  espressif/i2c_bus: "^2.0"
-  espressif/iot_button: "^4.0"
-
-  # ---- 本地唤醒词（ESP-SR，M5 阶段引入）----
-  espressif/esp-sr: "^2.1.0"
-
-  # ---- 云服务 HTTP/WS ----
+  # ---- 云服务：WebSocket（讯飞流式 ASR）----
   espressif/esp_websocket_client: "^1.3"
+
+  # ---- JSON 解析（cJSON，IDF 自带，无需单独声明）----
