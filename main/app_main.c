@@ -37,13 +37,15 @@ static void ui_status_update(lv_timer_t *timer)
     lv_obj_align(label, LV_ALIGN_CENTER, 0, -10);
 }
 
-/* 触摸读回调（LVGL 9：lv_indev_set_read_cb） */
-static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
+/* 屏幕触摸事件回调（LVGL 事件机制；不要覆盖 BSP 的 indev read_cb） */
+static void screen_event_cb(lv_event_t *e)
 {
-    (void)indev;
-    /* 简化：仅作为触摸事件反馈演示；默认读取由 BSP 的 read_cb 完成 */
-    if (hint_label && data->state == LV_INDEV_STATE_PRESSED) {
-        lv_label_set_text(hint_label, "Touch OK!\nGreat job!");
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_CLICKED) {
+        ESP_LOGI(TAG, "Touch clicked!");
+        if (hint_label) {
+            lv_label_set_text(hint_label, "Touch OK!\nGreat job!");
+        }
     }
 }
 
@@ -52,6 +54,9 @@ static void ui_main_screen_create(void)
 {
     lv_obj_t *scr = lv_screen_active();
     lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
+
+    /* 绑定屏幕触摸事件 */
+    lv_obj_add_event_cb(scr, screen_event_cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *title = lv_label_create(scr);
     lv_label_set_text(title, "AI WATCH");
@@ -96,13 +101,7 @@ void app_main(void)
         ESP_LOGE(TAG, "Touch init failed!");
         return;
     }
-    ESP_LOGI(TAG, "Touch device found");
-
-    /* 3. 注册触摸读回调（点按屏幕改变提示文字） */
-    bsp_display_lock(-1);
-    lv_indev_set_read_cb(tp, touch_read_cb);
-    bsp_display_unlock();
-    ESP_LOGI(TAG, "Touch callback set");
+    ESP_LOGI(TAG, "Touch device found (BSP read_cb active)");
 
     bsp_display_backlight_on();
     ESP_LOGI(TAG, "Backlight on");

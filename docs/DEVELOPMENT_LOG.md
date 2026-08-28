@@ -5,6 +5,42 @@
 
 ---
 
+## 2026-08-29
+
+### 🔧 修复：触摸无反应（LVGL 事件机制陷阱）
+
+**现象**：烧录后屏幕正常显示，但点击触摸屏无任何反应（日志无输出）。
+
+**根因**：
+- BSP 的 `esp_lv_adapter_register_touch()` 内部会调用
+  `lv_indev_set_read_cb(indev, lvgl_touch_read)` 注册**真正的触摸读取回调**，
+  它负责读 CST816S 触摸芯片数据（支持 IRQ 中断模式）。
+- 而 `app_main.c` 里用 `lv_indev_set_read_cb(tp, my_touch_read_cb)` **覆盖**了
+  BSP 的回调，但我的回调只检查 `data->state`，而 LVGL 传给它的 `data`
+  是个空结构——**没有任何真实触摸数据被读取**，所以永远感知不到触摸。
+
+**正确做法**：
+- **不要覆盖 BSP 的 indev read_cb**——触摸数据由 BSP 驱动持续读取。
+- 业务响应触摸应使用 **LVGL 事件机制**：
+  ```c
+  lv_obj_add_event_cb(scr, screen_event_cb, LV_EVENT_CLICKED, NULL);
+  // 回调里用 lv_event_get_code(e) 判断事件类型
+  ```
+- 屏幕对象/控件绑定事件即可，底层读取交给 BSP。
+
+**结果**：✅ 编译通过，点击屏幕触发 `LV_EVENT_CLICKED` → 提示文字更新 + 日志输出。
+
+**经验教训**：
+1. `lv_indev_set_read_cb()` 是"谁来读取触摸硬件"的底层回调，只有驱动层能碰；
+   应用层响应触摸必须用 `lv_obj_add_event_cb()`。
+2. 排查触摸问题：先看日志里 BSP 有没有打 `Touch input device registered`，
+   再确认有没有覆盖 read_cb。
+
+**注意**：LVGL 默认只分发 `LV_EVENT_CLICKED` 到"被点击对象"上，
+如果点击在空白处需绑定到 `screen_active()`（本工程已绑定）。
+
+---
+
 ## 2026-08-28（晚间）
 
 ### 🔧 修复：持续编译报错 + 白屏问题（已完成）
