@@ -24,3 +24,5 @@ __pycache__/
 # Secrets - never commit API keys
 **/secrets.h
 **/*.key
+**/config.yaml
+tools/llm-proxy/*.yaml
