@@ -7,9 +7,15 @@
  *
  * 注意：ES8311 与 ES7210 共用同一条 I2S 总线（半双工），
  *       播放与录音不能同时进行（依次 open/close）。
+ *
+ * 兼容性说明：codec 设备 open 时使用的格式必须与 Waveshare 官方 demo
+ * 一致（32bit / 双声道 / 16000Hz），否则 ES8311/ES7210 无法正确收发
+ * I2S 数据流。本模块内部使用 32bit/双声道 作为 I2S 传输格式，对外
+ * API（audio_play_pcm / 录音回调）保持 16bit 单声道 PCM 语义。
  */
 #include <math.h>
 #include <string.h>
+#include <stdlib.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -21,18 +27,23 @@
 static const char *TAG = "audio";
 
 #define AUDIO_SAMPLE_RATE 16000
-#define AUDIO_BITS        16
-#define AUDIO_CHANNELS    1
+
+/* I2S 传输格式：32bit / 双声道（与 Waveshare 官方 demo 一致） */
+#define CODEC_BITS        32
+#define CODEC_CHANNELS    2
+#define CODEC_BYTES       (CODEC_BITS / 8)
 
 static esp_codec_dev_handle_t s_spk_dev = NULL;
 static esp_codec_dev_handle_t s_mic_dev = NULL;
 static uint8_t s_volume = 80;
+static int s_sample_rate = AUDIO_SAMPLE_RATE;
 
 /* ============ 内部工具 ============ */
 
 static esp_codec_dev_handle_t speaker_dev(void)
 {
     if (!s_spk_dev) {
+        /* BSP 内部会自行 init I2C + I2S（默认配置 22050Hz） */
         s_spk_dev = bsp_audio_codec_speaker_init();
         ESP_LOGI(TAG, "speaker codec init: %s", s_spk_dev ? "OK" : "FAIL");
     }
@@ -42,67 +53,70 @@ static esp_codec_dev_handle_t speaker_dev(void)
 static esp_codec_dev_handle_t mic_dev(void)
 {
     if (!s_mic_dev) {
+        /* BSP 内部会自行 init I2C + I2S（默认配置 22050Hz） */
         s_mic_dev = bsp_audio_codec_microphone_init();
         ESP_LOGI(TAG, "mic codec init: %s", s_mic_dev ? "OK" : "FAIL");
     }
     return s_mic_dev;
 }
 
+/* 填充 codec open 所需的 fs：固定 32bit 双声道，采样率动态 */
+static esp_codec_dev_sample_info_t codec_fs(int sample_rate)
+{
+    esp_codec_dev_sample_info_t fs = {
+        .sample_rate = sample_rate,
+        .channel = CODEC_CHANNELS,
+        .bits_per_sample = CODEC_BITS,
+    };
+    return fs;
+}
+
 /* ============ 播放（ES8311） ============ */
 
 bool audio_play_init(int sample_rate)
 {
-    /* 配置 I2S（16kHz / 16bit / 单声道 / 全双工）。两个 codec 共享此总线。 */
-    i2s_std_config_t std_cfg = {
-        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(sample_rate > 0 ? sample_rate : AUDIO_SAMPLE_RATE),
-        .slot_cfg = I2S_STD_PHILIP_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
-        .gpio_cfg = {
-            .mclk = GPIO_NUM_2,
-            .bclk = GPIO_NUM_48,
-            .ws   = GPIO_NUM_38,
-            .dout = GPIO_NUM_47,
-            .din  = GPIO_NUM_39,
-        },
-    };
-
-    esp_err_t ret = bsp_audio_init(&std_cfg);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "bsp_audio_init failed: %s", esp_err_to_name(ret));
-        return false;
+    if (sample_rate > 0) {
+        s_sample_rate = sample_rate;
     }
-
     esp_codec_dev_handle_t dev = speaker_dev();
     if (!dev) {
         return false;
     }
-
     esp_codec_dev_set_out_vol(dev, s_volume);
-    ESP_LOGI(TAG, "audio init OK (%d Hz)", sample_rate > 0 ? sample_rate : AUDIO_SAMPLE_RATE);
+    ESP_LOGI(TAG, "audio init OK (%d Hz)", s_sample_rate);
     return true;
 }
 
 bool audio_play_pcm(const int16_t *data, size_t samples)
 {
     esp_codec_dev_handle_t dev = speaker_dev();
-    if (!dev) {
+    if (!dev || !data) {
         return false;
     }
 
-    esp_codec_dev_sample_info_t fs = {
-        .sample_rate = AUDIO_SAMPLE_RATE,
-        .channel = AUDIO_CHANNELS,
-        .bits_per_sample = AUDIO_BITS,
-    };
-
+    esp_codec_dev_sample_info_t fs = codec_fs(s_sample_rate);
     if (esp_codec_dev_open(dev, &fs) != 0) {
         ESP_LOGE(TAG, "codec open failed");
         return false;
     }
 
-    /* I2S 支持按字节数写入，samples 是样本数(16bit => 2字节/样本) */
-    size_t bytes = samples * sizeof(int16_t);
-    /* esp_codec_dev_write 需要 void*，去掉 const（内部不修改数据） */
-    int ret = esp_codec_dev_write(dev, (void *)data, bytes);
+    /* 16bit mono -> 32bit stereo：每个样本放到 int32 高 16 位，L/R 相同 */
+    size_t frames = samples * CODEC_CHANNELS;
+    int32_t *sbuf = malloc(frames * sizeof(int32_t));
+    if (!sbuf) {
+        ESP_LOGE(TAG, "play malloc failed");
+        esp_codec_dev_close(dev);
+        return false;
+    }
+    for (size_t i = 0; i < samples; i++) {
+        int32_t v = ((int32_t)data[i]) << 16;
+        sbuf[i * CODEC_CHANNELS]     = v;
+        sbuf[i * CODEC_CHANNELS + 1] = v;
+    }
+
+    size_t bytes = frames * sizeof(int32_t);
+    int ret = esp_codec_dev_write(dev, sbuf, bytes);
+    free(sbuf);
     esp_codec_dev_close(dev);
 
     return ret == (int)bytes;
@@ -115,7 +129,7 @@ bool audio_play_tone(int freq_hz, int ms)
         return false;
     }
 
-    size_t samples = (size_t)(AUDIO_SAMPLE_RATE * ms / 1000);
+    size_t samples = (size_t)(s_sample_rate * ms / 1000);
     int16_t *buf = malloc(samples * sizeof(int16_t));
     if (!buf) {
         ESP_LOGE(TAG, "tone malloc failed");
@@ -125,7 +139,7 @@ bool audio_play_tone(int freq_hz, int ms)
     /* 幅度 40%（避免爆音），正弦波 */
     const float amp = 0.4f * 32767.0f;
     for (size_t i = 0; i < samples; i++) {
-        buf[i] = (int16_t)(amp * sinf(2.0f * (float)M_PI * freq_hz * (float)i / AUDIO_SAMPLE_RATE));
+        buf[i] = (int16_t)(amp * sinf(2.0f * (float)M_PI * freq_hz * (float)i / s_sample_rate));
     }
 
     bool ok = audio_play_pcm(buf, samples);
@@ -174,12 +188,7 @@ static void record_task(void *arg)
         return;
     }
 
-    esp_codec_dev_sample_info_t fs = {
-        .sample_rate = AUDIO_SAMPLE_RATE,
-        .channel = AUDIO_CHANNELS,
-        .bits_per_sample = AUDIO_BITS,
-    };
-
+    esp_codec_dev_sample_info_t fs = codec_fs(s_sample_rate);
     if (esp_codec_dev_open(dev, &fs) != 0) {
         ESP_LOGE(TAG, "mic codec open failed");
         rc->running = false;
@@ -187,21 +196,45 @@ static void record_task(void *arg)
         return;
     }
 
-    /* 每块 20ms */
-    int16_t buf[320];
+    /* 每块 20ms：32bit/双声道交织，则每块帧数 = rate/50 */
+    size_t ch_frames = (size_t)(s_sample_rate / 50);
+    int32_t *rbuf = malloc(ch_frames * CODEC_CHANNELS * sizeof(int32_t));
+    int16_t *mono = malloc(ch_frames * sizeof(int16_t));
+    if (!rbuf || !mono) {
+        ESP_LOGE(TAG, "record malloc failed");
+        free(rbuf);
+        free(mono);
+        esp_codec_dev_close(dev);
+        rc->running = false;
+        vTaskDelete(NULL);
+        return;
+    }
+
     ESP_LOGI(TAG, "recording started...");
+    int err_cnt = 0;
 
     while (rc->running) {
-        int n = esp_codec_dev_read(dev, buf, sizeof(buf));
+        int n = esp_codec_dev_read(dev, rbuf, ch_frames * CODEC_CHANNELS * sizeof(int32_t));
         if (n > 0) {
-            size_t got = n / sizeof(int16_t);
-            if (!rc->cb(buf, got, rc->ctx)) {
+            size_t got = (size_t)n / (CODEC_CHANNELS * sizeof(int32_t));
+            for (size_t i = 0; i < got; i++) {
+                /* 左声道高16位 -> int16 单声道 */
+                mono[i] = (int16_t)(rbuf[i * CODEC_CHANNELS] >> 16);
+            }
+            if (!rc->cb(mono, got, rc->ctx)) {
                 ESP_LOGI(TAG, "record callback requested stop");
                 break;
             }
+        } else if (n < 0) {
+            if (++err_cnt <= 5) {
+                ESP_LOGW(TAG, "codec read err=%d", n);
+            }
+            vTaskDelay(pdMS_TO_TICKS(10));
         }
     }
 
+    free(rbuf);
+    free(mono);
     esp_codec_dev_close(dev);
     rc->running = false;
     ESP_LOGI(TAG, "recording stopped");
@@ -210,7 +243,9 @@ static void record_task(void *arg)
 
 bool audio_record_start(int sample_rate, audio_record_cb_t cb, void *ctx)
 {
-    (void)sample_rate;
+    if (sample_rate > 0) {
+        s_sample_rate = sample_rate;
+    }
     if (!cb || s_rec.running) {
         return false;
     }

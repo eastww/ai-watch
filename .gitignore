@@ -26,3 +26,6 @@ __pycache__/
 **/*.key
 **/config.yaml
 tools/llm-proxy/*.yaml
+
+# Tools (local dev utilities, LLM proxy with secrets)
+tools/

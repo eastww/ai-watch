@@ -5,6 +5,44 @@
 
 ---
 
+## 2026-08-29（续）
+
+### 🔧 修复：无开机声音 + 录音无数据（No audio / check MIC）
+
+**现象**：烧录后屏幕/触摸正常，但：
+- 开机无提示音（扬声器无声）
+- 触摸触发录音自测后，屏幕显示 "No audio\ncheck MIC"（`esp_codec_dev_read` 拿不到数据）
+
+**根因**：codec 设备 open 时使用的 **I2S 数据格式与 Waveshare 官方 demo 不一致**。
+- 我的旧实现：`esp_codec_dev_open()` 传 `16bit / 单声道 / 16kHz`，且手动调用
+  `bsp_audio_init(&std_cfg)` 传自定义 I2S 配置。
+- 官方 demo（已验证能出声）：`bsp_audio_codec_speaker_init()` 内部自动初始化
+  （I2C + I2S 默认配置），`esp_codec_dev_open()` 传 **`32bit / 双声道 / 16kHz`**。
+
+ESP-IDF `esp_codec_dev` 框架要求 channel 为偶数，单声道需转成
+`channel=2 + channel_mask(bit0)`，且 ES8311/ES7210 对 slot 位宽/声道有
+严格要求——16bit 单声道配置下数据流不匹配，导致 ES8311 无法解码出声音、
+ES7210 无法产出数据。
+
+**修复**（`main/src/audio/audio.c` 重写）：
+1. **不再手动调 `bsp_audio_init()`**，完全交给 BSP 的
+   `bsp_audio_codec_speaker_init()` / `bsp_audio_codec_microphone_init()`
+   内部自动初始化（与官方 demo 一致）。
+2. codec open 统一用 **`32bit / 2ch / 16kHz`**（与官方 demo 一致）。
+3. 模块内部做格式转换，**对外 API 保持 16bit 单声道 PCM 语义不变**：
+   - 播放：16bit mono → 32bit stereo（左右声道相同，数据放高 16 位）
+   - 录音：32bit stereo → 16bit mono（取左声道高 16 位）
+
+**结果**：✅ 编译通过（`ai_watch.bin` 0xab570），待烧录实测。
+
+**经验教训**：
+1. 音频 codec（ES8311/ES7210）的 I2S 数据格式**不能随意选**，必须以
+   Waveshare 官方 demo 的 `32bit/2ch/16kHz` 为准，否则硬件不工作。
+2. 不要手动传自定义 `i2s_std_config_t` 给 `bsp_audio_init()`，让 BSP
+   内部自动初始化更稳妥。
+
+---
+
 ## 2026-08-29
 
 ### ✅ M2 里程碑：音频模块（播放 + 录音）编译通过
