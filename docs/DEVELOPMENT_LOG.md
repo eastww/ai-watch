@@ -7,6 +7,34 @@
 
 ## 2026-08-29
 
+### ✅ M2 里程碑：音频模块（播放 + 录音）编译通过
+
+**完成内容**
+- 新增 `main/src/audio/audio.c`（+ `include/audio/audio.h`）：
+  - **播放（ES8311）**：`audio_play_init()` / `audio_play_pcm()` /
+    `audio_play_tone()`（正弦提示音）/ `audio_set_volume()`
+  - **录音（ES7210 + 双MIC）**：`audio_record_start()` / `audio_record_stop()`，
+    PCM 回调逐块（20ms/320样本）输送，返回 false 可主动停止
+- 主程序集成：
+  - 开机播放双音提示（660Hz + 990Hz）验证扬声器链路
+  - 触摸屏幕触发"录音 1s → 回放"自测（验证 MIC → ES7210 → I2S → 回放闭环）
+- 清除了与 DeepSeek 图片上传相关的残留代码（`main/src/http/`、`main/src/image/`）
+
+**硬件链路（半双工，播放/录音不能同时）**：
+```
+播放：ESP32-S3 I2S(TX) -> ES8311 -> PA(GPIO9) -> 扬声器
+录音：双MIC -> ES7210(回声消除) -> I2S(RX) -> ESP32-S3
+```
+
+**编译结果**：✅ `ai_watch.bin` 0xab430 bytes（~701KB），分区剩余 95%。
+
+**经验教训**：
+1. `esp_codec_dev_write()` 第二参数是 `void *`（非 const），传 `const` 指针
+   需显式强转，否则 -Werror 报错。
+2. 编辑 `app_main.c` 时若引用跨函数的 static 任务/变量，务必同步删除或保留，
+   否则会被编译器的 "unreferenced" 误伤——这次就是残留了已删除的
+   `image_test_task`/`send_image_task` 引用导致编译失败。
+
 ### 🔧 修复：触摸无反应（LVGL 事件机制陷阱）
 
 **现象**：烧录后屏幕正常显示，但点击触摸屏无任何反应（日志无输出）。

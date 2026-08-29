@@ -2,6 +2,7 @@
  * app_main.c - AI Watch 主程序
  *
  * M1：点亮 360x360 圆形屏（LVGL 9）+ 触摸反馈。
+ * M2：音频初始化 + 开机提示音；触摸触发"录音1s → 回放"自测。
  *
  * ⚠️ 关键：不要手动调用 lv_timer_handler()！
  * BSP 的 bsp_display_start() 内部会启动 esp_lv_adapter 的 worker 任务，
@@ -18,11 +19,87 @@
 #include "lvgl.h"
 
 #include "bsp/esp32_s3_touch_lcd_1_85B.h"
+#include "audio/audio.h"
 
 static const char *TAG = "ai_watch";
 
 static lv_obj_t *clock_label = NULL;
 static lv_obj_t *hint_label = NULL;
+
+/* ============ M2 音频自测（录音1s → 回放） ============ */
+#define M2_REC_SECONDS 1
+static int16_t s_rec_buf[M2_REC_SECONDS * 16000];
+static volatile size_t s_rec_len = 0;
+static volatile bool s_rec_done = false;
+
+static bool m2_record_cb(const int16_t *pcm, size_t samples, void *ctx)
+{
+    (void)ctx;
+    size_t max_samples = sizeof(s_rec_buf) / sizeof(int16_t);
+    if (s_rec_len + samples <= max_samples) {
+        memcpy(s_rec_buf + s_rec_len, pcm, samples * sizeof(int16_t));
+        s_rec_len += samples;
+    }
+    if (s_rec_len >= (size_t)(M2_REC_SECONDS * 16000)) {
+        s_rec_done = true;
+        return false; /* 停止录制 */
+    }
+    return true;
+}
+
+static void m2_audio_test_task(void *arg)
+{
+    (void)arg;
+    ESP_LOGI(TAG, "M2 test: recording %ds...", M2_REC_SECONDS);
+
+    s_rec_len = 0;
+    s_rec_done = false;
+    if (!audio_record_start(16000, m2_record_cb, NULL)) {
+        ESP_LOGE(TAG, "M2 record start failed");
+        if (hint_label) {
+            lv_label_set_text(hint_label, "Record FAIL\ncheck log");
+        }
+        vTaskDelete(NULL);
+        return;
+    }
+
+    /* 等待录满或超时（最多 M2_REC_SECONDS+2 秒） */
+    uint32_t waits = 0;
+    while (!s_rec_done && waits < (M2_REC_SECONDS + 2) * 20) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+        waits++;
+    }
+    audio_record_stop();
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    ESP_LOGI(TAG, "M2 test: captured %d samples, playing back...", (int)s_rec_len);
+    if (s_rec_len > 0) {
+        audio_play_pcm(s_rec_buf, s_rec_len);
+        if (hint_label) {
+            lv_label_set_text(hint_label, "Playback OK!\nM2 audio pass");
+        }
+    } else {
+        if (hint_label) {
+            lv_label_set_text(hint_label, "No audio\ncheck MIC");
+        }
+    }
+    vTaskDelete(NULL);
+}
+
+/* ============ UI ============ */
+
+/* 屏幕触摸事件回调（LVGL 事件机制；不要覆盖 BSP 的 indev read_cb） */
+static void screen_event_cb(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_CLICKED) {
+        ESP_LOGI(TAG, "Touch clicked! Starting M2 audio self-test...");
+        if (hint_label) {
+            lv_label_set_text(hint_label, "Recording 1s...");
+        }
+        xTaskCreate(m2_audio_test_task, "m2_audio", 4096, NULL, 5, NULL);
+    }
+}
 
 /* 每秒刷新时钟 */
 static void ui_status_update(lv_timer_t *timer)
@@ -35,18 +112,6 @@ static void ui_status_update(lv_timer_t *timer)
              (unsigned long)(sec % 60));
     lv_label_set_text(label, buf);
     lv_obj_align(label, LV_ALIGN_CENTER, 0, -10);
-}
-
-/* 屏幕触摸事件回调（LVGL 事件机制；不要覆盖 BSP 的 indev read_cb） */
-static void screen_event_cb(lv_event_t *e)
-{
-    lv_event_code_t code = lv_event_get_code(e);
-    if (code == LV_EVENT_CLICKED) {
-        ESP_LOGI(TAG, "Touch clicked!");
-        if (hint_label) {
-            lv_label_set_text(hint_label, "Touch OK!\nGreat job!");
-        }
-    }
 }
 
 /* 创建主界面 */
@@ -69,12 +134,14 @@ static void ui_main_screen_create(void)
     lv_obj_align(clock_label, LV_ALIGN_CENTER, 0, -10);
 
     hint_label = lv_label_create(scr);
-    lv_label_set_text(hint_label, "Touch to test\nWorking...");
+    lv_label_set_text(hint_label, "Touch to test\nAudio M2");
     lv_obj_set_style_text_align(hint_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(hint_label, LV_ALIGN_CENTER, 0, 40);
 
     lv_timer_create(ui_status_update, 1000, clock_label);
 }
+
+/* ============ 入口 ============ */
 
 void app_main(void)
 {
@@ -106,15 +173,28 @@ void app_main(void)
     bsp_display_backlight_on();
     ESP_LOGI(TAG, "Backlight on");
 
+    /* 3. M2：初始化音频 */
+    if (!audio_play_init(16000)) {
+        ESP_LOGE(TAG, "M2 audio init failed");
+    } else {
+        ESP_LOGI(TAG, "M2 audio ready");
+    }
+
     /* 4. 创建 UI（持锁操作 LVGL） */
     bsp_display_lock(-1);
     ui_main_screen_create();
     bsp_display_unlock();
     ESP_LOGI(TAG, "UI created");
 
-    ESP_LOGI(TAG, "AI Watch ready! Touch screen to see response...");
+    /* 5. 播放开机提示音（验证扬声器） */
+    audio_play_tone(660, 100);
+    vTaskDelay(pdMS_TO_TICKS(120));
+    audio_play_tone(990, 150);
+    ESP_LOGI(TAG, "M2 welcome tone played");
 
-    /* 5. 主任务仅做周期性状态日志；LVGL 刷新由 esp_lv_adapter worker 驱动 */
+    ESP_LOGI(TAG, "AI Watch ready! Touch screen to test audio...");
+
+    /* 6. 主任务仅做周期性状态日志；LVGL 刷新由 esp_lv_adapter worker 驱动 */
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(3000));
         ESP_LOGI(TAG, "System running...");

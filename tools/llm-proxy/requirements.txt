@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+httpx
+pyyaml
+Pillow
+# 可选：纯 OCR 兜底（CPU 可用）
+# rapidocr_onnxruntime

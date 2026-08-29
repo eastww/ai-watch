@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "app_main.c"
         "src/app_state.c"
+        "src/audio/audio.c"
     INCLUDE_DIRS "." "include"
     PRIV_REQUIRES
         nvs_flash
