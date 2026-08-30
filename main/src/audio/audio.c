@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"
 #include "esp_log.h"
 #include "driver/i2s_std.h"
 
@@ -276,7 +277,9 @@ bool audio_record_start(int sample_rate, audio_record_cb_t cb, void *ctx)
     s_rec.ctx = ctx;
     s_rec.running = true;
 
-    BaseType_t ret = xTaskCreate(record_task, "audio_rec", 8192, &s_rec, 5, NULL);
+    /* 任务栈放 PSRAM（8MB 富余），释放内部 RAM 给 SPI DMA / TLS */
+    BaseType_t ret = xTaskCreateWithCaps(record_task, "audio_rec", 8192, &s_rec,
+                                         5, NULL, MALLOC_CAP_SPIRAM);
     if (ret != pdPASS) {
         s_rec.running = false;
         return false;

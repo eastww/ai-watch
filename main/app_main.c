@@ -13,6 +13,7 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_sntp.h"
@@ -281,12 +282,12 @@ static void screen_event_cb(lv_event_t *e)
             if (hint_label) {
                 lv_label_set_text(hint_label, "Listening 3s...");
             }
-            xTaskCreate(m3_asr_test_task, "m3_asr", 8192, NULL, 5, NULL);
+            xTaskCreateWithCaps(m3_asr_test_task, "m3_asr", 8192, NULL, 5, NULL, MALLOC_CAP_SPIRAM);
         } else {
             if (hint_label) {
                 lv_label_set_text(hint_label, "Recording 1s...");
             }
-            xTaskCreate(m2_audio_test_task, "m2_audio", 4096, NULL, 5, NULL);
+            xTaskCreateWithCaps(m2_audio_test_task, "m2_audio", 4096, NULL, 5, NULL, MALLOC_CAP_SPIRAM);
         }
     }
 }

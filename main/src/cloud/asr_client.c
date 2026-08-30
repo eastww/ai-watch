@@ -17,6 +17,7 @@
 #include "freertos/semphr.h"
 #include "esp_log.h"
 #include "esp_websocket_client.h"
+#include "esp_crt_bundle.h"
 #include "mbedtls/base64.h"
 #include "mbedtls/md.h"
 #include "cJSON.h"
@@ -293,6 +294,7 @@ bool asr_start(void *user_ctx, asr_text_cb_t cb)
         .disable_auto_reconnect = true,
         .buffer_size = ASR_BUFFER_SIZE,
         .network_timeout_ms = 15000,
+        .crt_bundle_attach = esp_crt_bundle_attach, /* 证书包验证，否则 TLS 握手被拒 */
     };
     s_ws = esp_websocket_client_init(&cfg);
     if (!s_ws) {

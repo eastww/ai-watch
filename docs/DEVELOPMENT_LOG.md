@@ -5,6 +5,43 @@
 
 ---
 
+## 2026-08-30（续7）
+
+### 🔧 修复：record start failed + TLS 握手失败（内部 RAM 不足 + 未验证证书）
+
+**现象（实测日志，commit 2b452f6）**：
+- 栈溢出修复生效：触摸不再死机，ASR 正常启动 ✅
+- 但两个新错误：
+  ```
+  E ai_watch: record start failed                    ← xTaskCreate 失败
+  E spi_master: Failed to allocate priv TX buffer    ← 内部 RAM 耗尽
+  E esp-tls-mbedtls: No server verification option set
+  E esp-tls: create_ssl_handle failed
+  E transport_ws: Error connecting to host iat-api.xfyun.cn:443
+  ```
+
+**根因（两个叠加）**：
+
+1. **内部 RAM 不足**：WiFi + WebSocket(TLS) 启动后，内部 RAM 已被大量占用；
+   此时 `xTaskCreate` 创建 8192B 栈的录音任务失败（任务栈默认在**内部 RAM**）。
+   SPI master 的 DMA 缓冲（`setup_dma_priv_buffer`）也分配失败 → LVGL 刷屏失败。
+   - **修复**：录音/m3_asr/m2_audio 任务改用 `xTaskCreateWithCaps(..., MALLOC_CAP_SPIRAM)`
+     把任务栈放到 **PSRAM**（8MB 富余），释放内部 RAM 给 SPI DMA / TLS。
+
+2. **TLS 未配置证书验证**：`esp_websocket_client` 没设 `crt_bundle_attach`，
+   esp-tls 报 "No server verification option set" → 握手失败。
+   - **修复**：`cfg.crt_bundle_attach = esp_crt_bundle_attach`（已
+     `CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y`，用系统证书包验证服务器）。
+
+**经验教训**：
+1. **任务栈默认在内部 RAM**：多个大栈任务会快速耗尽内部 RAM（DMA/TLS 必需）。
+   大栈任务用 `xTaskCreateWithCaps` + `MALLOC_CAP_SPIRAM`，把 PSRAM 用起来。
+2. WebSocket/TLS 客户端必须配置证书验证（`crt_bundle_attach` 或 `cert_pem`），
+   否则 mbedTLS 直接拒绝握手。
+3. `record start failed` + `spi_master DMA 分配失败` 是"内部 RAM 耗尽"的典型组合。
+
+---
+
 ## 2026-08-30（续6）
 
 ### 🔧 修复：触摸即死机（根因：asr_feed 栈溢出撑爆 4096B 录音任务栈）
