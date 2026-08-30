@@ -5,6 +5,49 @@
 
 ---
 
+## 2026-08-30（续5）
+
+### 🔧 修复：M3 ASR 卡死看门狗 + SNTP 时间不同步（实测日志）
+
+**现象（实测日志）**：
+1. WiFi 连接成功（`got ip: 192.168.31.82`）✅
+2. 但系统时间一直未同步：`system time not synced yet, ASR auth unavailable`
+   → `ASR start failed`
+3. 随后**任务看门狗反复触发**：
+   ```
+   E task_wdt: Task watchdog got triggered
+   CPU 0: m3_asr / CPU 1: m3_asr
+   Backtrace: ... lv_inv_area ... lv_label_set_text at app_main.c:176
+   ```
+
+**根因（两个 bug 叠加）**：
+
+1. **LVGL 死锁（致命）**：`m3_asr_test_task` / `m2_audio_test_task` 是**独立
+   FreeRTOS 任务**，但里面**直接调用 `lv_label_set_text()` 而没有用
+   `bsp_display_lock()/unlock()` 保护**。LVGL 非线程安全，与 esp_lv_adapter
+   worker 并发访问同一 label → 内部状态损坏/死锁 → `lv_inv_area` 卡死 →
+   看门狗触发。之前 `wifi_state_cb`（加过锁）没事，唯独这两个任务漏了。
+   - **修复**：新增 `ui_set_text()` 辅助函数（内部 `bsp_display_lock(-1)`
+     → `lv_label_set_text` → `bsp_display_unlock()`），**所有独立任务中
+     的 LVGL 更新一律走它**。
+
+2. **SNTP 假启动**：`pool.ntp.org` 在国内常不可达/超时，且 ASR 任务在时间
+   未同步时只打 WARN 就立刻开始（必然鉴权失败）。
+   - **修复**：SNTP 换 **`ntp.aliyun.com`**；ASR 任务先 `wait_time_synced(12s)`
+     等时间同步，超时才报错退出。
+
+3. **防重入**（触发的诱因）：快速连触会创建多个 `m3_asr` 任务互相叠加。
+   新增 `s_asr_busy` 标志，一次只允许一个 ASR 会话运行。
+
+**经验教训**：
+1. **凡是独立任务里操作 LVGL，必须加 `bsp_display_lock/unlock`**（LVGL
+   非线程安全，worker 会并发刷新）。这是本项目最容易踩的坑之一。
+2. 国内网络用 `ntp.aliyun.com` 而非 `pool.ntp.org`。
+3. 看门狗 backtrace 里的 `lv_inv_area → lv_label_set_text` 是"无锁访问
+   LVGL"的典型特征，遇到先查锁。
+
+---
+
 ## 2026-08-30（续4）
 
 ### 🚀 M3：ASR 客户端（讯飞流式听写） + 语音链路自测
