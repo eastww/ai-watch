@@ -39,9 +39,9 @@ extern "C" {
 #define WIFI_MAX_RETRY     10
 
 /* ---------- 云服务端点 ---------- */
-/* DeepSeek LLM (OpenAI 兼容) */
-#define LLM_URL            "https://api.deepseek.com/chat/completions"
-#define LLM_MODEL          "deepseek-chat"
+/* LLM（OpenAI 兼容中转站）：base_url 见 tools/llm-proxy/config.yaml */
+#define LLM_URL            "https://api.sfkey.cn/v1/chat/completions"
+#define LLM_MODEL          "deepseek-v4-pro"
 #define LLM_MAX_TOKENS     512
 #define LLM_TEMPERATURE    0.8f
 
