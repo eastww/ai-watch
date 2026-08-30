@@ -4,6 +4,7 @@ idf_component_register(
         "src/app_state.c"
         "src/audio/audio.c"
         "src/wifi/wifi_mgr.c"
+        "src/cloud/asr_client.c"
     INCLUDE_DIRS "." "include"
     PRIV_REQUIRES
         nvs_flash
@@ -11,5 +12,8 @@ idf_component_register(
         esp_event
         esp_netif
         lwip
+        esp_websocket_client
+        mbedtls
+        json
         waveshare__esp32_s3_touch_lcd_1_85B
 )

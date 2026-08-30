@@ -19,6 +19,7 @@ typedef void (*asr_text_cb_t)(const char *text, bool is_final, void *ctx);
 bool asr_start(void *user_ctx, asr_text_cb_t cb);
 int  asr_feed(const uint8_t *pcm, size_t len);   /* 喂 PCM 数据 */
 bool asr_stop(void);                             /* 结束并等待最终结果 */
+void asr_deinit(void);                           /* 停止并释放连接 */
 
 /* ---------- 大模型（LLM，见 llm_client.h） ---------- */
 

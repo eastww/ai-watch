@@ -5,6 +5,33 @@
 
 ---
 
+## 2026-08-30（续4）
+
+### 🚀 M3：ASR 客户端（讯飞流式听写） + 语音链路自测
+
+- 新建 `main/src/cloud/asr_client.c`（实现 `cloud.h` 的 `asr_start/asr_feed/asr_stop`）：
+  - **鉴权 URL**：RFC1123 GMT 时间 + HMAC-SHA256(APISecret) 签名 + base64，
+    拼接到 `wss://iat-api.xfyun.cn/v2/iat` 查询参数（host/date/authorization）。
+  - **协议**：首帧(`status=0` 含 appid+language/domain/accent/vad_eos) →
+    音频帧(`status=1`, PCM base64) → 结束帧(`status=2`)。
+  - **结果解析**：cJSON 解析 `data.result.ws[].cw[].w` 拼接文本，
+    回调 `asr_text_cb_t(text, is_final, ctx)`（`status==2` 为最终结果）。
+  - 密钥未配置（占位符）或系统时间未同步时 `asr_start` 返回 false。
+  - ⚠️ `esp_websocket_client_close()` **不能在事件处理器中调用**，
+    结束帧只标记状态，由上层在普通任务上下文调 `asr_deinit()` 清理。
+- `app_main.c` 集成：
+  - **SNTP**：WiFi 连接后自动启动（ASR 鉴权需要正确系统时间）。
+  - **M3 自测**（触摸触发，需 WiFi 已连接）：录音 3s → 流式 ASR →
+    屏幕显示识别文本，日志打印 partial/final。
+  - 触摸逻辑：WiFi 已连 → M3 ASR；未连 → M2 录音回放。
+- `sdkconfig.defaults`：启用 SNTP（`CONFIG_LWIP_SNTP=y`）与时区。
+- `config.h`：ASR 端点 `iat-api.xfyun.cn`，密钥在本地 `secrets.h`。
+
+**使用前提**：用户在 `secrets.h` 填入讯飞 `SECRET_ASR_APPID/API_KEY/API_SECRET`；
+音频格式 16k/16bit mono 与 `asr_feed` 完全一致（M2 录音输出格式）。
+
+---
+
 ## 2026-08-30（续3）
 
 ### 🚀 M3 启动：WiFi 管理模块（wifi_mgr）

@@ -15,18 +15,21 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_sntp.h"
 #include "nvs_flash.h"
 #include "lvgl.h"
 
 #include "bsp/esp32_s3_touch_lcd_1_85B.h"
 #include "audio/audio.h"
 #include "wifi/wifi_mgr.h"
+#include "cloud/cloud.h"
 
 static const char *TAG = "ai_watch";
 
 static lv_obj_t *clock_label = NULL;
 static lv_obj_t *hint_label = NULL;
 static lv_obj_t *wifi_label = NULL;
+static lv_obj_t *asr_label = NULL;
 
 /* ============ M2 音频自测（录音1s → 回放） ============ */
 #define M2_REC_SECONDS 1
@@ -88,6 +91,127 @@ static void m2_audio_test_task(void *arg)
     vTaskDelete(NULL);
 }
 
+/* ============ M3: SNTP 时间同步（ASR 鉴权需要正确时间） ============ */
+
+static bool s_sntp_started = false;
+
+static void start_sntp(void)
+{
+    if (s_sntp_started) {
+        return;
+    }
+    s_sntp_started = true;
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org");
+    esp_sntp_init();
+    ESP_LOGI(TAG, "SNTP started, waiting time sync...");
+}
+
+static bool time_is_synced(void)
+{
+    return time(NULL) > 1000000000L;
+}
+
+/* ============ M3: ASR 自测（录音 → 流式识别 → 显示文本） ============ */
+
+#define M3_REC_SECONDS 3
+static volatile bool s_asr_final = false;
+static char s_asr_text[512];
+
+/* ASR 文本回调（WebSocket 事件任务上下文，勿做重活；用锁更新 LVGL） */
+static void asr_text_cb(const char *text, bool is_final, void *ctx)
+{
+    (void)ctx;
+    if (!text) {
+        return;
+    }
+    if (is_final) {
+        strncpy(s_asr_text, text, sizeof(s_asr_text) - 1);
+        s_asr_text[sizeof(s_asr_text) - 1] = '\0';
+        s_asr_final = true;
+        ESP_LOGI(TAG, "ASR final: %s", text);
+    } else {
+        ESP_LOGI(TAG, "ASR partial: %s", text);
+    }
+    if (asr_label) {
+        bsp_display_lock(-1);
+        lv_label_set_text(asr_label, text);
+        bsp_display_unlock();
+    }
+}
+
+/* 录音回调：直接把 PCM 喂给 ASR */
+static bool m3_record_cb(const int16_t *pcm, size_t samples, void *ctx)
+{
+    (void)ctx;
+    asr_feed((const uint8_t *)pcm, samples * sizeof(int16_t));
+    return true; /* 由超时/手动停止结束 */
+}
+
+static void m3_asr_test_task(void *arg)
+{
+    (void)arg;
+
+    if (!wifi_mgr_is_connected()) {
+        ESP_LOGE(TAG, "M3 ASR requires WiFi");
+        if (hint_label) {
+            lv_label_set_text(hint_label, "Need WiFi first");
+        }
+        vTaskDelete(NULL);
+        return;
+    }
+    if (!time_is_synced()) {
+        ESP_LOGW(TAG, "time not synced, ASR auth may fail");
+    }
+
+    s_asr_final = false;
+    s_asr_text[0] = '\0';
+    if (asr_label) {
+        lv_label_set_text(asr_label, "Listening...");
+    }
+
+    if (!asr_start(NULL, asr_text_cb)) {
+        ESP_LOGE(TAG, "ASR start failed");
+        if (hint_label) {
+            lv_label_set_text(hint_label, "ASR start FAIL");
+        }
+        vTaskDelete(NULL);
+        return;
+    }
+    if (!audio_record_start(16000, m3_record_cb, NULL)) {
+        ESP_LOGE(TAG, "record start failed");
+        asr_deinit();
+        vTaskDelete(NULL);
+        return;
+    }
+
+    ESP_LOGI(TAG, "M3: recording %ds -> ASR...", M3_REC_SECONDS);
+    vTaskDelay(pdMS_TO_TICKS(M3_REC_SECONDS * 1000));
+    audio_record_stop();
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    /* 发结束帧，等待最终结果（最多 8s） */
+    asr_stop();
+    uint32_t waits = 0;
+    while (!s_asr_final && waits < 160) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+        waits++;
+    }
+    asr_deinit();
+
+    if (hint_label) {
+        if (s_asr_final && s_asr_text[0]) {
+            char buf[48];
+            snprintf(buf, sizeof(buf), "Got text!\n(len=%d)", (int)strlen(s_asr_text));
+            lv_label_set_text(hint_label, buf);
+        } else {
+            lv_label_set_text(hint_label, "ASR no result\ncheck log");
+        }
+    }
+    ESP_LOGI(TAG, "M3 ASR test done, final=%d text='%s'", s_asr_final, s_asr_text);
+    vTaskDelete(NULL);
+}
+
 /* ============ M3: WiFi 状态显示 ============ */
 
 /* WiFi 状态变化回调（事件任务上下文调用；更新 LVGL 需持锁） */
@@ -102,6 +226,9 @@ static void wifi_state_cb(wifi_mgr_state_t state, void *ctx)
     default:                           txt = "WiFi: off";        break;
     }
     ESP_LOGI(TAG, "%s (ip=%s)", txt, wifi_mgr_get_ip_str());
+    if (state == WIFI_MGR_STATE_CONNECTED) {
+        start_sntp(); /* 连接后同步时间（幂等） */
+    }
     if (!wifi_label) {
         return;
     }
@@ -125,11 +252,19 @@ static void screen_event_cb(lv_event_t *e)
 {
     lv_event_code_t code = lv_event_get_code(e);
     if (code == LV_EVENT_CLICKED) {
-        ESP_LOGI(TAG, "Touch clicked! Starting M2 audio self-test...");
-        if (hint_label) {
-            lv_label_set_text(hint_label, "Recording 1s...");
+        if (wifi_mgr_is_connected()) {
+            ESP_LOGI(TAG, "Touch clicked! Starting M3 ASR test...");
+            if (hint_label) {
+                lv_label_set_text(hint_label, "Listening 3s...");
+            }
+            xTaskCreate(m3_asr_test_task, "m3_asr", 8192, NULL, 5, NULL);
+        } else {
+            ESP_LOGI(TAG, "Touch clicked! Starting M2 audio self-test...");
+            if (hint_label) {
+                lv_label_set_text(hint_label, "Recording 1s...");
+            }
+            xTaskCreate(m2_audio_test_task, "m2_audio", 4096, NULL, 5, NULL);
         }
-        xTaskCreate(m2_audio_test_task, "m2_audio", 4096, NULL, 5, NULL);
     }
 }
 
@@ -169,6 +304,15 @@ static void ui_main_screen_create(void)
     lv_label_set_text(hint_label, "Touch to test\nAudio M2");
     lv_obj_set_style_text_align(hint_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(hint_label, LV_ALIGN_CENTER, 0, 40);
+
+    /* M3: ASR 识别文本（中部） */
+    asr_label = lv_label_create(scr);
+    lv_label_set_text(asr_label, "");
+    lv_obj_set_style_text_align(asr_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(asr_label, lv_color_hex(0xFFFFFF), 0);
+    lv_label_set_long_mode(asr_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(asr_label, 300);
+    lv_obj_align(asr_label, LV_ALIGN_TOP_MID, 0, 80);
 
     /* M3: WiFi 状态（顶部） */
     wifi_label = lv_label_create(scr);
