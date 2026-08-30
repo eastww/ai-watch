@@ -5,6 +5,42 @@
 
 ---
 
+## 2026-08-30（续）
+
+### 🔧 修复：录音打通但播放无声（根因：write 后立即 close 掐断音频）
+
+**现象（实测日志，commit 72a57d9）**：
+- 录音成功：`captured 16000 samples`（1 秒 @16kHz）✅
+- 播放路径 open OK、write 阻塞约 1.2 秒（数据在写入 DMA），
+  但扬声器**完全无声**——连开机纯正弦提示音也无声音。
+
+**根因**：`audio_play_pcm()` 里 `esp_codec_dev_write()` 后**立即
+`esp_codec_dev_close()`**。而：
+1. `i2s_channel_write()` 只是把数据写入 **DMA 缓冲**就返回，**不等
+   播放完成**（音频是由 I2S 时钟逐帧推出去的）。
+2. `esp_codec_dev_close()` 内部会立即 **mute + 关闭 PA + suspend
+   codec + disable I2S 通道**。
+3. 于是 DMA 里还没播完（甚至还没开始播）的音频直接被掐断 → 完全无声。
+
+**修复**（`main/src/audio/audio.c`）：
+- write 成功后**延时播放时长 +100ms 再 close**，让 DMA 有足够时间
+  把音频全部推给 ES8311 → 扬声器播完。
+- 增加诊断日志：
+  - `esp_codec_dev_dump_reg()` 打印 ES8311 全部寄存器（确认初始化、
+    mute/音量/时钟状态）
+  - write 失败时打 `codec write FAILED ret=%d`
+  - 播放完成打 `playback done: N samples (M ms)`
+
+**经验教训**：
+1. **I2S 播放是"异步推流"**：`esp_codec_dev_write` 填满 DMA 缓冲即返回，
+   真正发声依赖 I2S 时钟持续把 DMA 数据推出。write 后**绝不能立即
+   close**（close 会 mute/关 PA/disable 通道），必须等播放时长过去。
+2. 排查"无声"时先确认：数据是否写入成功（write 返回值）、DMA 是否在
+   被消费（write 是否阻塞了约播放时长）、PA 是否使能、ES8311 寄存器
+   的 mute/音量/时钟状态。
+
+---
+
 ## 2026-08-30
 
 ### 🔧 修复：无声音 + 录音无数据（根因：esp_codec_dev 返回值语义误用）

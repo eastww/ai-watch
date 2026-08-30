@@ -82,6 +82,8 @@ bool audio_play_init(int sample_rate)
     if (!dev) {
         return false;
     }
+    /* 诊断：dump ES8311 寄存器，确认初始化是否成功、mute/音量状态 */
+    esp_codec_dev_dump_reg(dev);
     ESP_LOGI(TAG, "audio init OK (%d Hz, vol=%d)", s_sample_rate, s_volume);
     return true;
 }
@@ -120,9 +122,23 @@ bool audio_play_pcm(const int16_t *data, size_t samples)
     /* 注意：esp_codec_dev_write 返回状态码(0=成功)，不是字节数 */
     int ret = esp_codec_dev_write(dev, sbuf, bytes);
     free(sbuf);
-    esp_codec_dev_close(dev);
 
-    return ret == ESP_CODEC_DEV_OK;
+    if (ret != ESP_CODEC_DEV_OK) {
+        ESP_LOGE(TAG, "codec write FAILED ret=%d", ret);
+        esp_codec_dev_close(dev);
+        return false;
+    }
+
+    /* 关键：i2s_channel_write 只是把数据写入 DMA 缓冲即返回，不等播放完成。
+     * 若立即 esp_codec_dev_close()，会立刻 mute + 关闭 PA + suspend codec，
+     * 音频还没播出来就被掐断（表现为完全无声）。
+     * 因此要等待播放时长（+余量）后再 close，让 DMA 排空、扬声器播完。 */
+    uint32_t play_ms = (uint32_t)(samples * 1000 / s_sample_rate);
+    vTaskDelay(pdMS_TO_TICKS(play_ms + 100));
+
+    esp_codec_dev_close(dev);
+    ESP_LOGI(TAG, "playback done: %u samples (%u ms)", (unsigned)samples, (unsigned)play_ms);
+    return true;
 }
 
 /* 播放一个正弦提示音（用于唤醒/成功/失败音效） */
@@ -198,6 +214,9 @@ static void record_task(void *arg)
         vTaskDelete(NULL);
         return;
     }
+
+    /* 录音前关闭播放：若刚播完，PA 等状态已由 close 处理；此处确保 I2S 时钟正常 */
+    ESP_LOGI(TAG, "mic open OK, start read loop");
 
     /* 每块 20ms：32bit/双声道交织，则每块帧数 = rate/50 */
     size_t ch_frames = (size_t)(s_sample_rate / 50);
