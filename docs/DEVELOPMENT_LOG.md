@@ -5,6 +5,43 @@
 
 ---
 
+## 2026-08-30
+
+### 🔧 修复：无声音 + 录音无数据（根因：esp_codec_dev 返回值语义误用）
+
+**现象（实测日志）**：
+- 录音 started → stopped 约 3 秒，**期间没有任何 read 错误日志**，
+  但 captured 0 samples，屏幕显示 "No audio check MIC"。
+- 播放路径 open OK 两次（两个提示音），但扬声器无声。
+
+**真正根因（两个叠加 bug）**：
+
+1. **录音无数据**：`esp_codec_dev_read()` 返回的是**状态码**（成功=
+   `ESP_CODEC_DEV_OK`=0），**不是实际读取的字节数**！旧代码 `if (n > 0)`
+   永远不成立（成功时 n==0），导致数据其实一直在流入 `rbuf` 却被丢弃，
+   回调从不执行。日志证据：3 秒内 `n < 0` 分支从未触发（无 err 日志），
+   说明 read 一直成功，数据一直在。
+   - **修复**：改判断为 `if (ret == ESP_CODEC_DEV_OK)`，成功后按请求的
+     整块大小处理（I2S 阻塞读会填满请求量）。
+
+2. **播放无声**：`esp_codec_dev_set_out_vol()` 在 codec **未 open** 时
+   调用会失败——`_verify_codec_setting()` 返回 `WRONG_STATE` 直接 return，
+   **`dev->volume = volume` 那行在 return 之后，根本没执行** → 音量保持
+   默认 0 → open 时框架 `_update_codec_setting()` 用 `_get_vol_db(0)`
+   = **-96dB（几乎静音）** → 无声！
+   - **修复**：把 `esp_codec_dev_set_out_vol()` 移到 `esp_codec_dev_open()`
+     成功**之后**再调用。
+
+**经验教训**：
+1. `esp_codec_dev_read/write` 返回**状态码**（`ESP_CODEC_DEV_OK`=0），
+   不是字节数。不要用返回值判断读到了多少。
+2. `esp_codec_dev_set_out_vol/mute` 必须在 codec open 之后调用，否则
+   静默失败且音量不会被保存（框架内部有 WRONG_STATE 校验）。
+3. 判断"数据是否真的在流入"：看日志里 read 是否长时间无 err 且无数据
+   到达，这是"数据被丢弃"而非"硬件没数据"的典型特征。
+
+---
+
 ## 2026-08-29（续）
 
 ### 🔧 修复：无开机声音 + 录音无数据（No audio / check MIC）

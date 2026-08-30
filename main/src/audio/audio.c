@@ -82,8 +82,7 @@ bool audio_play_init(int sample_rate)
     if (!dev) {
         return false;
     }
-    esp_codec_dev_set_out_vol(dev, s_volume);
-    ESP_LOGI(TAG, "audio init OK (%d Hz)", s_sample_rate);
+    ESP_LOGI(TAG, "audio init OK (%d Hz, vol=%d)", s_sample_rate, s_volume);
     return true;
 }
 
@@ -100,6 +99,9 @@ bool audio_play_pcm(const int16_t *data, size_t samples)
         return false;
     }
 
+    /* 必须在 open 之后设置音量！codec 未 open 时 set_out_vol 会失败且不保存音量 */
+    esp_codec_dev_set_out_vol(dev, s_volume);
+
     /* 16bit mono -> 32bit stereo：每个样本放到 int32 高 16 位，L/R 相同 */
     size_t frames = samples * CODEC_CHANNELS;
     int32_t *sbuf = malloc(frames * sizeof(int32_t));
@@ -115,11 +117,12 @@ bool audio_play_pcm(const int16_t *data, size_t samples)
     }
 
     size_t bytes = frames * sizeof(int32_t);
+    /* 注意：esp_codec_dev_write 返回状态码(0=成功)，不是字节数 */
     int ret = esp_codec_dev_write(dev, sbuf, bytes);
     free(sbuf);
     esp_codec_dev_close(dev);
 
-    return ret == (int)bytes;
+    return ret == ESP_CODEC_DEV_OK;
 }
 
 /* 播放一个正弦提示音（用于唤醒/成功/失败音效） */
@@ -214,9 +217,11 @@ static void record_task(void *arg)
     int err_cnt = 0;
 
     while (rc->running) {
-        int n = esp_codec_dev_read(dev, rbuf, ch_frames * CODEC_CHANNELS * sizeof(int32_t));
-        if (n > 0) {
-            size_t got = (size_t)n / (CODEC_CHANNELS * sizeof(int32_t));
+        /* 注意：esp_codec_dev_read 成功时返回 0 (ESP_CODEC_DEV_OK)，不是字节数！
+         * 数据直接填入 rbuf（请求多少读多少，I2S 阻塞读）。 */
+        int ret = esp_codec_dev_read(dev, rbuf, ch_frames * CODEC_CHANNELS * sizeof(int32_t));
+        if (ret == ESP_CODEC_DEV_OK) {
+            size_t got = ch_frames;
             for (size_t i = 0; i < got; i++) {
                 /* 左声道高16位 -> int16 单声道 */
                 mono[i] = (int16_t)(rbuf[i * CODEC_CHANNELS] >> 16);
@@ -225,9 +230,9 @@ static void record_task(void *arg)
                 ESP_LOGI(TAG, "record callback requested stop");
                 break;
             }
-        } else if (n < 0) {
+        } else {
             if (++err_cnt <= 5) {
-                ESP_LOGW(TAG, "codec read err=%d", n);
+                ESP_LOGW(TAG, "codec read err=%d", ret);
             }
             vTaskDelay(pdMS_TO_TICKS(10));
         }
