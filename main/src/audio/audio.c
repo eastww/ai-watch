@@ -120,9 +120,23 @@ bool audio_play_pcm(const int16_t *data, size_t samples)
     /* 注意：esp_codec_dev_write 返回状态码(0=成功)，不是字节数 */
     int ret = esp_codec_dev_write(dev, sbuf, bytes);
     free(sbuf);
-    esp_codec_dev_close(dev);
 
-    return ret == ESP_CODEC_DEV_OK;
+    if (ret != ESP_CODEC_DEV_OK) {
+        ESP_LOGE(TAG, "codec write FAILED ret=%d", ret);
+        esp_codec_dev_close(dev);
+        return false;
+    }
+
+    /* 关键：i2s_channel_write 只是把数据写入 DMA 缓冲即返回，不等播放完成。
+     * 若立即 esp_codec_dev_close()，会立刻 mute + 关闭 PA + suspend codec，
+     * 音频还没播出来就被掐断（表现为完全无声）。
+     * 因此要等待播放时长（+余量）后再 close，让 DMA 排空、扬声器播完。 */
+    uint32_t play_ms = (uint32_t)(samples * 1000 / s_sample_rate);
+    vTaskDelay(pdMS_TO_TICKS(play_ms + 100));
+
+    esp_codec_dev_close(dev);
+    ESP_LOGI(TAG, "playback done: %u samples (%u ms)", (unsigned)samples, (unsigned)play_ms);
+    return true;
 }
 
 /* 播放一个正弦提示音（用于唤醒/成功/失败音效） */
@@ -223,8 +237,11 @@ static void record_task(void *arg)
         if (ret == ESP_CODEC_DEV_OK) {
             size_t got = ch_frames;
             for (size_t i = 0; i < got; i++) {
-                /* 左声道高16位 -> int16 单声道 */
-                mono[i] = (int16_t)(rbuf[i * CODEC_CHANNELS] >> 16);
+                /* 左声道 24bit 右对齐 -> int16 单声道
+                 * ES7210 是 24bit ADC，数据右对齐在 32bit 槽的低 24 位，
+                 * 用 >>8 取有效 16bit。之前误用 >>16 取高字节（几乎为0），
+                 * 导致音量被砍掉约 250 倍（表现为"几乎无声"）。 */
+                mono[i] = (int16_t)(rbuf[i * CODEC_CHANNELS] >> 8);
             }
             if (!rc->cb(mono, got, rc->ctx)) {
                 ESP_LOGI(TAG, "record callback requested stop");
