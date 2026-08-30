@@ -3,6 +3,7 @@ idf_component_register(
         "app_main.c"
         "src/app_state.c"
         "src/audio/audio.c"
+        "src/wifi/wifi_mgr.c"
     INCLUDE_DIRS "." "include"
     PRIV_REQUIRES
         nvs_flash

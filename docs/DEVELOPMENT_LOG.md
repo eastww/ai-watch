@@ -5,6 +5,26 @@
 
 ---
 
+## 2026-08-30（续3）
+
+### 🚀 M3 启动：WiFi 管理模块（wifi_mgr）
+
+- 新建 `main/src/wifi/wifi_mgr.c` + `main/include/wifi/wifi_mgr.h`：
+  - STA 模式异步连接（事件驱动），断线自动重连（`WIFI_MAX_RETRY` 次）。
+  - 状态机：DOWN → CONNECTING → CONNECTED / DISCONNECTED，支持多回调注册。
+  - `esp_netif`/`esp_event_loop` 幂等初始化；NVS 惰性初始化。
+- `app_main.c` 接入：注册 `wifi_state_cb` 更新屏幕顶部 WiFi 状态标签
+  （灰色=连接中，绿色=已连接+IP，红色=断开），并打印本机 IP。
+- `config.h` 改进：用 `__has_include` 自动检测本机 `secrets.h`
+  （已被 gitignore），不再依赖手动的 `CONFIG_AI_WATCH_USE_SECRETS` 开关。
+- 开机日志预期：`STA start, connecting to '<ssid>'...` → `got ip: x.x.x.x`
+  → `state -> CONNECTED`。
+
+**备注**：SSID/密码取自 `main/include/secrets.h`（本地，不入库）。
+若未配置，`wifi_mgr_init()` 返回 false 并跳过 WiFi（不阻塞 UI）。
+
+---
+
 ## 2026-08-30（续2）
 
 ### 🔧 修复：录音回放"几乎无声"（根因：ES7210 24bit 右对齐，误用 >>16 取位）

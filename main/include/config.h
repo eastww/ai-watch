@@ -13,9 +13,16 @@ extern "C" {
 #endif
 
 /* ---------- 密钥（放 secrets.h，不入库） ---------- */
-#ifdef CONFIG_AI_WATCH_USE_SECRETS
-#include "secrets.h"
-#else
+/* secrets.h 已被 gitignore，仅存在于本机。用 __has_include 自动检测：
+ * 存在则使用真实密钥，不存在（例如他人 clone）则回退到占位符。 */
+#if defined(__has_include)
+#  if __has_include("secrets.h")
+#    include "secrets.h"
+#    define AI_WATCH_HAVE_SECRETS 1
+#  endif
+#endif
+
+#ifndef AI_WATCH_HAVE_SECRETS
 #define SECRET_WIFI_SSID      "your_ssid"
 #define SECRET_WIFI_PASSWORD  "your_password"
 #define SECRET_DEEPSEEK_API_KEY   "sk-xxxx"

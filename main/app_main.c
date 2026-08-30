@@ -20,11 +20,13 @@
 
 #include "bsp/esp32_s3_touch_lcd_1_85B.h"
 #include "audio/audio.h"
+#include "wifi/wifi_mgr.h"
 
 static const char *TAG = "ai_watch";
 
 static lv_obj_t *clock_label = NULL;
 static lv_obj_t *hint_label = NULL;
+static lv_obj_t *wifi_label = NULL;
 
 /* ============ M2 音频自测（录音1s → 回放） ============ */
 #define M2_REC_SECONDS 1
@@ -86,6 +88,36 @@ static void m2_audio_test_task(void *arg)
     vTaskDelete(NULL);
 }
 
+/* ============ M3: WiFi 状态显示 ============ */
+
+/* WiFi 状态变化回调（事件任务上下文调用；更新 LVGL 需持锁） */
+static void wifi_state_cb(wifi_mgr_state_t state, void *ctx)
+{
+    (void)ctx;
+    const char *txt = NULL;
+    switch (state) {
+    case WIFI_MGR_STATE_CONNECTING:    txt = "WiFi: connecting"; break;
+    case WIFI_MGR_STATE_CONNECTED:     txt = "WiFi: connected";  break;
+    case WIFI_MGR_STATE_DISCONNECTED:  txt = "WiFi: lost";       break;
+    default:                           txt = "WiFi: off";        break;
+    }
+    ESP_LOGI(TAG, "%s (ip=%s)", txt, wifi_mgr_get_ip_str());
+    if (!wifi_label) {
+        return;
+    }
+    bsp_display_lock(-1);
+    if (state == WIFI_MGR_STATE_CONNECTED) {
+        char buf[48];
+        snprintf(buf, sizeof(buf), "WiFi: %s", wifi_mgr_get_ip_str());
+        lv_label_set_text(wifi_label, buf);
+        lv_obj_set_style_text_color(wifi_label, lv_color_hex(0x00E676), 0);
+    } else {
+        lv_label_set_text(wifi_label, txt);
+        lv_obj_set_style_text_color(wifi_label, lv_color_hex(0xFF5252), 0);
+    }
+    bsp_display_unlock();
+}
+
 /* ============ UI ============ */
 
 /* 屏幕触摸事件回调（LVGL 事件机制；不要覆盖 BSP 的 indev read_cb） */
@@ -137,6 +169,12 @@ static void ui_main_screen_create(void)
     lv_label_set_text(hint_label, "Touch to test\nAudio M2");
     lv_obj_set_style_text_align(hint_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(hint_label, LV_ALIGN_CENTER, 0, 40);
+
+    /* M3: WiFi 状态（顶部） */
+    wifi_label = lv_label_create(scr);
+    lv_label_set_text(wifi_label, "WiFi: ...");
+    lv_obj_set_style_text_color(wifi_label, lv_color_hex(0x9E9E9E), 0);
+    lv_obj_align(wifi_label, LV_ALIGN_TOP_MID, 0, 8);
 
     lv_timer_create(ui_status_update, 1000, clock_label);
 }
@@ -192,9 +230,17 @@ void app_main(void)
     audio_play_tone(990, 150);
     ESP_LOGI(TAG, "M2 welcome tone played");
 
+    /* 6. M3：初始化 WiFi（异步连接；注册状态回调更新屏幕） */
+    wifi_mgr_register_cb(wifi_state_cb, NULL);
+    if (wifi_mgr_init()) {
+        ESP_LOGI(TAG, "M3 WiFi starting...");
+    } else {
+        ESP_LOGW(TAG, "M3 WiFi not configured (set SSID/password in secrets.h)");
+    }
+
     ESP_LOGI(TAG, "AI Watch ready! Touch screen to test audio...");
 
-    /* 6. 主任务仅做周期性状态日志；LVGL 刷新由 esp_lv_adapter worker 驱动 */
+    /* 7. 主任务仅做周期性状态日志；LVGL 刷新由 esp_lv_adapter worker 驱动 */
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(3000));
         ESP_LOGI(TAG, "System running...");
