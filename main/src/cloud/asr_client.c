@@ -311,13 +311,14 @@ int asr_feed(const uint8_t *pcm, size_t len)
     if (!s_ws || s_state != ASR_STREAMING || len == 0 || len > ASR_MAX_PCM_BYTES) {
         return -1;
     }
-    /* PCM -> base64 */
+    /* PCM -> base64（静态缓冲，避免栈溢出——asr_feed 由 4096 栈的录音任务调用） */
     static char b64buf[ASR_MAX_PCM_BYTES * 2];
     int n = b64(pcm, len, b64buf, sizeof(b64buf));
     if (n < 0) {
         return -1;
     }
-    char frame[ASR_MAX_PCM_BYTES * 3 + 128];
+    /* JSON 帧同样用静态缓冲：ASR_MAX_PCM_BYTES*3+128 ≈ 6KB，绝不能放栈上 */
+    static char frame[ASR_MAX_PCM_BYTES * 3 + 128];
     int flen = snprintf(frame, sizeof(frame),
                         "{\"data\":{\"status\":1,\"format\":\"audio/L16;rate=%d\",\"encoding\":\"raw\",\"audio\":\"%s\"}}",
                         ASR_SAMPLE_RATE, b64buf);

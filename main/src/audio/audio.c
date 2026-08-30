@@ -276,7 +276,7 @@ bool audio_record_start(int sample_rate, audio_record_cb_t cb, void *ctx)
     s_rec.ctx = ctx;
     s_rec.running = true;
 
-    BaseType_t ret = xTaskCreate(record_task, "audio_rec", 4096, &s_rec, 5, NULL);
+    BaseType_t ret = xTaskCreate(record_task, "audio_rec", 8192, &s_rec, 5, NULL);
     if (ret != pdPASS) {
         s_rec.running = false;
         return false;
