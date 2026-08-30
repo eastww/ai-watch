@@ -217,6 +217,8 @@ static void record_task(void *arg)
 
     /* 录音前关闭播放：若刚播完，PA 等状态已由 close 处理；此处确保 I2S 时钟正常 */
     ESP_LOGI(TAG, "mic open OK, start read loop");
+    /* 诊断：dump ES7210 寄存器，确认 MCLK/时钟、PGA 增益、MIC 电源/bias、格式 */
+    esp_codec_dev_dump_reg(dev);
 
     /* 每块 20ms：32bit/双声道交织，则每块帧数 = rate/50 */
     size_t ch_frames = (size_t)(s_sample_rate / 50);
@@ -234,6 +236,12 @@ static void record_task(void *arg)
 
     ESP_LOGI(TAG, "recording started...");
     int err_cnt = 0;
+    /* 诊断统计：区分"MIC 全 0 静音" vs "取位不对" */
+    int32_t peak_raw = 0;   /* 原始 32bit 数据（两声道）绝对峰值 */
+    int32_t peak_mono = 0;  /* 处理后 16bit 数据峰值 */
+    int64_t sum_abs = 0;
+    uint32_t total = 0;
+    bool first_block = true;
 
     while (rc->running) {
         /* 注意：esp_codec_dev_read 成功时返回 0 (ESP_CODEC_DEV_OK)，不是字节数！
@@ -241,9 +249,24 @@ static void record_task(void *arg)
         int ret = esp_codec_dev_read(dev, rbuf, ch_frames * CODEC_CHANNELS * sizeof(int32_t));
         if (ret == ESP_CODEC_DEV_OK) {
             size_t got = ch_frames;
+            if (first_block) {
+                first_block = false;
+                ESP_LOGI(TAG, "first raw L: %08lx %08lx %08lx %08lx | R: %08lx %08lx %08lx %08lx",
+                         (unsigned long)rbuf[0], (unsigned long)rbuf[2], (unsigned long)rbuf[4], (unsigned long)rbuf[6],
+                         (unsigned long)rbuf[1], (unsigned long)rbuf[3], (unsigned long)rbuf[5], (unsigned long)rbuf[7]);
+            }
             for (size_t i = 0; i < got; i++) {
+                for (int c = 0; c < CODEC_CHANNELS; c++) {
+                    int32_t r = rbuf[i * CODEC_CHANNELS + c];
+                    int32_t a = r < 0 ? -r : r;
+                    if (a > peak_raw) peak_raw = a;
+                }
                 /* 左声道高16位 -> int16 单声道 */
                 mono[i] = (int16_t)(rbuf[i * CODEC_CHANNELS] >> 16);
+                int32_t a = mono[i] < 0 ? -mono[i] : mono[i];
+                if (a > peak_mono) peak_mono = a;
+                sum_abs += a;
+                total++;
             }
             if (!rc->cb(mono, got, rc->ctx)) {
                 ESP_LOGI(TAG, "record callback requested stop");
@@ -257,6 +280,8 @@ static void record_task(void *arg)
         }
     }
 
+    ESP_LOGI(TAG, "record stats: raw_peak=%ld mono_peak=%ld avg_abs=%ld total=%lu",
+             (long)peak_raw, (long)peak_mono, total ? (long)(sum_abs / total) : 0, (unsigned long)total);
     free(rbuf);
     free(mono);
     esp_codec_dev_close(dev);
