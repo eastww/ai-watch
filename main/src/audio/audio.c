@@ -82,8 +82,6 @@ bool audio_play_init(int sample_rate)
     if (!dev) {
         return false;
     }
-    /* 诊断：dump ES8311 寄存器，确认初始化是否成功、mute/音量状态 */
-    esp_codec_dev_dump_reg(dev);
     ESP_LOGI(TAG, "audio init OK (%d Hz, vol=%d)", s_sample_rate, s_volume);
     return true;
 }
@@ -122,23 +120,9 @@ bool audio_play_pcm(const int16_t *data, size_t samples)
     /* 注意：esp_codec_dev_write 返回状态码(0=成功)，不是字节数 */
     int ret = esp_codec_dev_write(dev, sbuf, bytes);
     free(sbuf);
-
-    if (ret != ESP_CODEC_DEV_OK) {
-        ESP_LOGE(TAG, "codec write FAILED ret=%d", ret);
-        esp_codec_dev_close(dev);
-        return false;
-    }
-
-    /* 关键：i2s_channel_write 只是把数据写入 DMA 缓冲即返回，不等播放完成。
-     * 若立即 esp_codec_dev_close()，会立刻 mute + 关闭 PA + suspend codec，
-     * 音频还没播出来就被掐断（表现为完全无声）。
-     * 因此要等待播放时长（+余量）后再 close，让 DMA 排空、扬声器播完。 */
-    uint32_t play_ms = (uint32_t)(samples * 1000 / s_sample_rate);
-    vTaskDelay(pdMS_TO_TICKS(play_ms + 100));
-
     esp_codec_dev_close(dev);
-    ESP_LOGI(TAG, "playback done: %u samples (%u ms)", (unsigned)samples, (unsigned)play_ms);
-    return true;
+
+    return ret == ESP_CODEC_DEV_OK;
 }
 
 /* 播放一个正弦提示音（用于唤醒/成功/失败音效） */
@@ -215,11 +199,6 @@ static void record_task(void *arg)
         return;
     }
 
-    /* 录音前关闭播放：若刚播完，PA 等状态已由 close 处理；此处确保 I2S 时钟正常 */
-    ESP_LOGI(TAG, "mic open OK, start read loop");
-    /* 诊断：dump ES7210 寄存器，确认 MCLK/时钟、PGA 增益、MIC 电源/bias、格式 */
-    esp_codec_dev_dump_reg(dev);
-
     /* 每块 20ms：32bit/双声道交织，则每块帧数 = rate/50 */
     size_t ch_frames = (size_t)(s_sample_rate / 50);
     int32_t *rbuf = malloc(ch_frames * CODEC_CHANNELS * sizeof(int32_t));
@@ -236,12 +215,6 @@ static void record_task(void *arg)
 
     ESP_LOGI(TAG, "recording started...");
     int err_cnt = 0;
-    /* 诊断统计：区分"MIC 全 0 静音" vs "取位不对" */
-    int32_t peak_raw = 0;   /* 原始 32bit 数据（两声道）绝对峰值 */
-    int32_t peak_mono = 0;  /* 处理后 16bit 数据峰值 */
-    int64_t sum_abs = 0;
-    uint32_t total = 0;
-    bool first_block = true;
 
     while (rc->running) {
         /* 注意：esp_codec_dev_read 成功时返回 0 (ESP_CODEC_DEV_OK)，不是字节数！
@@ -249,24 +222,9 @@ static void record_task(void *arg)
         int ret = esp_codec_dev_read(dev, rbuf, ch_frames * CODEC_CHANNELS * sizeof(int32_t));
         if (ret == ESP_CODEC_DEV_OK) {
             size_t got = ch_frames;
-            if (first_block) {
-                first_block = false;
-                ESP_LOGI(TAG, "first raw L: %08lx %08lx %08lx %08lx | R: %08lx %08lx %08lx %08lx",
-                         (unsigned long)rbuf[0], (unsigned long)rbuf[2], (unsigned long)rbuf[4], (unsigned long)rbuf[6],
-                         (unsigned long)rbuf[1], (unsigned long)rbuf[3], (unsigned long)rbuf[5], (unsigned long)rbuf[7]);
-            }
             for (size_t i = 0; i < got; i++) {
-                for (int c = 0; c < CODEC_CHANNELS; c++) {
-                    int32_t r = rbuf[i * CODEC_CHANNELS + c];
-                    int32_t a = r < 0 ? -r : r;
-                    if (a > peak_raw) peak_raw = a;
-                }
                 /* 左声道高16位 -> int16 单声道 */
                 mono[i] = (int16_t)(rbuf[i * CODEC_CHANNELS] >> 16);
-                int32_t a = mono[i] < 0 ? -mono[i] : mono[i];
-                if (a > peak_mono) peak_mono = a;
-                sum_abs += a;
-                total++;
             }
             if (!rc->cb(mono, got, rc->ctx)) {
                 ESP_LOGI(TAG, "record callback requested stop");
@@ -280,8 +238,6 @@ static void record_task(void *arg)
         }
     }
 
-    ESP_LOGI(TAG, "record stats: raw_peak=%ld mono_peak=%ld avg_abs=%ld total=%lu",
-             (long)peak_raw, (long)peak_mono, total ? (long)(sum_abs / total) : 0, (unsigned long)total);
     free(rbuf);
     free(mono);
     esp_codec_dev_close(dev);
